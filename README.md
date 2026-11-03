@@ -1,4 +1,4 @@
-# Guardian — Geospatial Intelligence & Safe Route Optimization Module
+# Guardian: safe-route engine
 
 This is the intelligence/data/geospatial **backend** for the Guardian women's
 safety platform. It does not build the iPhone UI (a separate SwiftUI app
