@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock
 from models.enums import DataLabel, RoadType
 from models.schemas import LatLng
 from datetime import datetime as _dt
+import providers.osm as _osm
 from providers.osm import (
     OSMRoadDataProvider, OSMLightingDataProvider, OSMCCTVDataProvider,
     OSMEmergencyInfrastructureProvider, OSMActivityDensityProvider, _CACHE,
@@ -26,12 +27,13 @@ def _mock_response(json_data):
 
 def setup_function():
     _CACHE.clear()  # avoid cross-test cache pollution
+    _osm._breaker_tripped_at = None  # a failure test trips the breaker; reset it so later tests reach the mock
 
 
 def test_osm_road_provider_maps_highway_tag_to_road_type():
     point = LatLng(lat=28.6, lng=77.2)
     fake_data = {"elements": [{"tags": {"highway": "residential"}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         result = OSMRoadDataProvider().classify_road(point)
     assert result.value == RoadType.RESIDENTIAL
     assert result.label == DataLabel.REAL
@@ -39,7 +41,7 @@ def test_osm_road_provider_maps_highway_tag_to_road_type():
 
 def test_osm_road_provider_no_data_returns_estimated_unknown():
     point = LatLng(lat=0.0, lng=0.0)
-    with patch("providers.osm.requests.post", return_value=_mock_response({"elements": []})):
+    with patch("providers.osm._session.post", return_value=_mock_response({"elements": []})):
         result = OSMRoadDataProvider().classify_road(point)
     assert result.value == RoadType.UNKNOWN
     assert result.label == DataLabel.ESTIMATED
@@ -47,7 +49,7 @@ def test_osm_road_provider_no_data_returns_estimated_unknown():
 
 def test_osm_road_provider_network_failure_returns_estimated_not_real():
     point = LatLng(lat=1.0, lng=1.0)
-    with patch("providers.osm.requests.post", side_effect=Exception("timeout")):
+    with patch("providers.osm._session.post", side_effect=Exception("timeout")):
         result = OSMRoadDataProvider().classify_road(point)
     assert result.label == DataLabel.ESTIMATED  # never fabricate REAL on failure
 
@@ -55,7 +57,7 @@ def test_osm_road_provider_network_failure_returns_estimated_not_real():
 def test_osm_lighting_provider_scores_lit_ways_higher():
     point = LatLng(lat=28.6, lng=77.2)
     fake_data = {"elements": [{"tags": {"lit": "yes"}}, {"tags": {"highway": "street_lamp"}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         result = OSMLightingDataProvider().get_lighting_score(point, datetime(2026, 1, 1, 22, 0, tzinfo=timezone.utc))
     assert result.label == DataLabel.REAL
     assert result.value > 0.5
@@ -64,7 +66,7 @@ def test_osm_lighting_provider_scores_lit_ways_higher():
 def test_osm_cctv_provider_parses_camera_nodes():
     point = LatLng(lat=28.6, lng=77.2)
     fake_data = {"elements": [{"lat": 28.601, "lon": 77.201, "tags": {}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         cams = OSMCCTVDataProvider().get_cameras_near(point, 200)
     assert len(cams) == 1
     assert cams[0].label == DataLabel.REAL
@@ -73,7 +75,7 @@ def test_osm_cctv_provider_parses_camera_nodes():
 def test_osm_emergency_provider_queries_police_amenity():
     point = LatLng(lat=28.6, lng=77.2)
     fake_data = {"elements": [{"lat": 28.601, "lon": 77.201, "tags": {"name": "Sector 12 Police Station"}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         stations = OSMEmergencyInfrastructureProvider().get_police_near(point, 1000)
     assert len(stations) == 1
     assert stations[0].name == "Sector 12 Police Station"
@@ -103,7 +105,7 @@ def test_activity_density_provider_uses_real_osm_venue_count():
     point = LatLng(lat=28.6, lng=77.2)
     # Overpass "out count" returns one synthetic element carrying a total.
     fake_data = {"elements": [{"tags": {"total": "9", "nodes": "9", "ways": "0", "relations": "0"}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         result = OSMActivityDensityProvider().get_activity_score(point, _dt.now(timezone.utc))
     assert result.label == DataLabel.REAL
     assert result.raw_count == 9
@@ -113,7 +115,7 @@ def test_activity_density_provider_uses_real_osm_venue_count():
 def test_activity_density_provider_zero_real_venues_is_a_true_zero_not_a_guess():
     point = LatLng(lat=0.0, lng=0.0)
     fake_data = {"elements": [{"tags": {"total": "0"}}]}
-    with patch("providers.osm.requests.post", return_value=_mock_response(fake_data)):
+    with patch("providers.osm._session.post", return_value=_mock_response(fake_data)):
         result = OSMActivityDensityProvider().get_activity_score(point, _dt.now(timezone.utc))
     assert result.label == DataLabel.REAL  # a real "nothing mapped here" is still real data, not estimated
     assert result.raw_count == 0
@@ -122,7 +124,7 @@ def test_activity_density_provider_zero_real_venues_is_a_true_zero_not_a_guess()
 
 def test_activity_density_provider_network_failure_returns_estimated():
     point = LatLng(lat=28.6, lng=77.2)
-    with patch("providers.osm.requests.post", side_effect=Exception("timeout")):
+    with patch("providers.osm._session.post", side_effect=Exception("timeout")):
         result = OSMActivityDensityProvider().get_activity_score(point, _dt.now(timezone.utc))
     assert result.label == DataLabel.ESTIMATED
     assert result.raw_count is None
